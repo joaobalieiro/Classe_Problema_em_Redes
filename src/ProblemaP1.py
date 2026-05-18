@@ -29,21 +29,14 @@ class ProblemaP1(Grafo):
         if Q_ext is not None:
             self.set_Q_ext(Q_ext)  
 
-    def setup(self):
+    def solve(self):
         if self.Q_ext is None:
-            raise ValueError("Q_ext must be defined before fitting. Use set_Q_ext().")
+            raise ValueError("Define Q_ext before solving the system of equations. Use set_Q_ext() method.")
 
         self.K = self._compute_physical_matrix()
         self.A = self.compute_connection_matrix(sparse_output=True)
         self.M = (self.A.T @ self.K @ self.A).tocsr()
         self.is_fitted = True
-        return self
-
-    def solve(self):
-        if self.Q_ext is None:
-            raise ValueError("Define Q_ext before solving the system of equations. Use set_Q_ext() method.")
-        if not self.is_fitted:
-            raise NotFittedError()
 
         node_keys = self.get_node_order()
         b = np.array([self.Q_ext[key] for key in node_keys], dtype=float)
