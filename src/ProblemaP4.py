@@ -377,7 +377,7 @@ class ProblemaP4(ProblemaP1):
 
         return c_obj, integrality, bounds, constraints, metadata
 
-    def solve_milp(self):
+    def solve_milp(self, accept_feasible=True, use_fallback=True):
         c_obj, integrality, bounds, constraints, metadata = self._build_milp()
 
         result = milp(
@@ -388,12 +388,28 @@ class ProblemaP4(ProblemaP1):
             options=self.solver_options,
         )
 
-        if not result.success:
-            raise RuntimeError(f"o solver nao encontrou solucao otima: {result.message}")
-
         self.p4_result = result
-        self._load_solution(result.x, metadata)
-        return self.summary()
+
+        if result.success:
+            self.solution_status = "otima"
+            self.solution_is_optimal = True
+            self._load_solution(result.x, metadata)
+            return self.summary()
+
+        if accept_feasible and result.x is not None:
+            self.solution_status = "viavel_nao_certificada"
+            self.solution_is_optimal = False
+            self._load_solution(result.x, metadata)
+            return self.summary()
+
+        if use_fallback:
+            self.solution_status = "heuristica"
+            self.solution_is_optimal = False
+            candidate = self._heuristic_pressure_drop_solution()
+            self._load_candidate_solution(candidate)
+            return self.summary()
+
+        raise RuntimeError(f"o solver nao retornou solucao utilizavel: {result.message}")
 
     def solve(self):
         return self.solve_milp()
@@ -478,6 +494,10 @@ class ProblemaP4(ProblemaP1):
             "max_thick_pipes": int(self.max_thick_pipes),
             "n_thick_used": int(np.sum(self.x_solution)),
             "selected_thick_edges": list(self.selected_thick_edges),
+            "solution_status": getattr(self, "solution_status", None),
+            "solution_is_optimal": getattr(self, "solution_is_optimal", None),
+            "solver_message": getattr(self.p4_result, "message", None) if self.p4_result is not None else None,
+            "mip_gap": getattr(self.p4_result, "mip_gap", None) if self.p4_result is not None else None,
         }
 
     def edge_solution_table(self):
@@ -589,3 +609,50 @@ class ProblemaP4(ProblemaP1):
         ax.axis("off")
         fig.tight_layout()
         return fig, ax
+    
+    def _heuristic_pressure_drop_solution(self):
+        self._ensure_ready()
+
+        if self.fine_conductivities is None or self.thick_conductivities is None:
+            self._compute_fine_and_thick_conductivities()
+
+        edge_list = self.get_edge_list()
+
+        p_fine, _ = self._solve_linear_with_conductivities(self.fine_conductivities)
+        pressure_drops = np.abs(self.A @ p_fine)
+
+        n_select = min(self.max_thick_pipes, self.num_edges)
+        selected_indices = np.argsort(-pressure_drops)[:n_select]
+        selected_edges = [edge_list[i] for i in selected_indices]
+
+        return self.evaluate_configuration(thick_edges=selected_edges)
+
+
+    def _load_candidate_solution(self, candidate):
+        if self.fine_conductivities is None or self.thick_conductivities is None:
+            self._compute_fine_and_thick_conductivities()
+
+        edge_list = self.get_edge_list()
+        thick_set = set(candidate["thick_edges"])
+
+        x = np.array([1 if edge in thick_set else 0 for edge in edge_list], dtype=int)
+        conductivities = self.fine_conductivities + (self.thick_conductivities - self.fine_conductivities) * x
+
+        self.x_solution = x
+        self.selected_thick_edges = list(candidate["thick_edges"])
+        self.objective_value = float(candidate["pressure_range"])
+
+        self.K = diags(conductivities, offsets=0, format="csr", dtype=float)
+        self.M = (self.A.T @ self.K @ self.A).tocsr()
+        self.p = np.asarray(candidate["pressures"], dtype=float)
+
+        self._update_node_pressures()
+        self._compute_edge_flows()
+
+        for e, (u, v) in enumerate(edge_list):
+            attrs = self.edges[u][v]
+            attrs["x_grosso"] = int(x[e])
+            attrs["tipo_cano"] = "grosso" if x[e] == 1 else "fino"
+            attrs["area_original"] = float(attrs["area"])
+            attrs["area_usada"] = float(attrs["area"] * (self.thick_area_factor if x[e] == 1 else 1.0))
+            attrs["condutancia_usada"] = float(conductivities[e])
