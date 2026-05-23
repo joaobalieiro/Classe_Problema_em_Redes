@@ -16,8 +16,8 @@ class ProblemaP4(ProblemaP1):
     problema de otimizacao mista para distribuicao de canos grossos
 
     a classe recebe uma instancia do problema p1 e escolhe em quais arestas
-    devem ser colocados os canos grossos para minimizar a amplitude de pressao
-    max_i p_i - min_i p_i
+    devem ser colocados os canos grossos para minimizar a maior pressao
+    da rede, assumindo que a menor pressao e a pressao de saida prescrita
     """
 
     def __init__(
@@ -181,9 +181,7 @@ class ProblemaP4(ProblemaP1):
             "q": np.arange(n_nodes, n_nodes + n_edges, dtype=int),
             "x": np.arange(n_nodes + n_edges, n_nodes + 2 * n_edges, dtype=int),
             "p_max": n_nodes + 2 * n_edges,
-            "p_min": n_nodes + 2 * n_edges + 1,
-            "z": n_nodes + 2 * n_edges + 2,
-            "n_var": n_nodes + 2 * n_edges + 3,
+            "n_var": n_nodes + 2 * n_edges + 1,
         }
 
     def _add_constraint(self, rows, cols, data, lower, upper, row_data, lb, ub):
@@ -249,27 +247,6 @@ class ProblemaP4(ProblemaP1):
                 -np.inf,
                 0.0,
             )
-            self._add_constraint(
-                rows,
-                cols,
-                data,
-                lower,
-                upper,
-                {idx["p"][i]: 1.0, idx["p_min"]: -1.0},
-                0.0,
-                np.inf,
-            )
-
-        self._add_constraint(
-            rows,
-            cols,
-            data,
-            lower,
-            upper,
-            {idx["z"]: 1.0, idx["p_max"]: -1.0, idx["p_min"]: 1.0},
-            0.0,
-            np.inf,
-        )
 
         for e, (u, v) in enumerate(edge_list):
             i = node_index[u]
@@ -343,7 +320,7 @@ class ProblemaP4(ProblemaP1):
         constraints = LinearConstraint(A_ub, np.array(lower), np.array(upper))
 
         c_obj = np.zeros(idx["n_var"], dtype=float)
-        c_obj[idx["z"]] = 1.0
+        c_obj[idx["p_max"]] = 1.0
 
         lb = np.full(idx["n_var"], -np.inf, dtype=float)
         ub = np.full(idx["n_var"], np.inf, dtype=float)
@@ -356,10 +333,6 @@ class ProblemaP4(ProblemaP1):
         ub[idx["x"]] = 1.0
         lb[idx["p_max"]] = p_lower
         ub[idx["p_max"]] = p_upper
-        lb[idx["p_min"]] = p_lower
-        ub[idx["p_min"]] = p_upper
-        lb[idx["z"]] = 0.0
-        ub[idx["z"]] = pressure_span
 
         bounds = Bounds(lb, ub)
 
@@ -397,10 +370,21 @@ class ProblemaP4(ProblemaP1):
             return self.summary()
 
         if accept_feasible and result.x is not None:
-            self.solution_status = "viavel_nao_certificada"
-            self.solution_is_optimal = False
-            self._load_solution(result.x, metadata)
-            return self.summary()
+            idx = metadata["idx"]
+            x_raw = np.asarray(result.x[idx["x"]], dtype=float)
+            x_round = np.rint(x_raw)
+            is_integral = np.allclose(x_raw, x_round, atol=1e-5)
+
+            if self.use_exact_number:
+                count_ok = int(np.sum(x_round)) == int(self.max_thick_pipes)
+            else:
+                count_ok = int(np.sum(x_round)) <= int(self.max_thick_pipes)
+
+            if is_integral and count_ok:
+                self.solution_status = "viavel_nao_certificada"
+                self.solution_is_optimal = False
+                self._load_solution(result.x, metadata)
+                return self.summary()
 
         if use_fallback:
             self.solution_status = "heuristica"
@@ -428,7 +412,7 @@ class ProblemaP4(ProblemaP1):
 
         self.x_solution = x
         self.selected_thick_edges = [edge for edge, value in zip(edge_list, x) if value == 1]
-        self.objective_value = float(solution[idx["z"]])
+        self.objective_value = float(solution[idx["p_max"]])
 
         self.K = diags(conductivities, offsets=0, format="csr", dtype=float)
         self.M = (self.A.T @ self.K @ self.A).tocsr()
@@ -477,7 +461,7 @@ class ProblemaP4(ProblemaP1):
                 raise RuntimeError("numero de combinacoes excedeu max_combinations")
 
             candidate = self.evaluate_configuration(thick_edges=comb)
-            if best is None or candidate["pressure_range"] < best["pressure_range"]:
+            if best is None or candidate["pressure_max"] < best["pressure_max"]:
                 best = candidate
 
         return best
@@ -487,10 +471,12 @@ class ProblemaP4(ProblemaP1):
             raise ValueError("execute solve_milp antes de chamar summary")
 
         return {
-            "objective_pressure_range": float(np.max(self.p) - np.min(self.p)),
+            "objective_pressure_max": float(np.max(self.p)),
             "solver_objective": float(self.objective_value),
             "pressure_min": float(np.min(self.p)),
             "pressure_max": float(np.max(self.p)),
+            "pressure_range": float(np.max(self.p) - np.min(self.p)),
+            "objective_pressure_range": float(np.max(self.p) - np.min(self.p)),
             "max_thick_pipes": int(self.max_thick_pipes),
             "n_thick_used": int(np.sum(self.x_solution)),
             "selected_thick_edges": list(self.selected_thick_edges),
@@ -640,7 +626,7 @@ class ProblemaP4(ProblemaP1):
 
         self.x_solution = x
         self.selected_thick_edges = list(candidate["thick_edges"])
-        self.objective_value = float(candidate["pressure_range"])
+        self.objective_value = float(candidate["pressure_max"])
 
         self.K = diags(conductivities, offsets=0, format="csr", dtype=float)
         self.M = (self.A.T @ self.K @ self.A).tocsr()
