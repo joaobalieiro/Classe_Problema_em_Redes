@@ -1,16 +1,14 @@
 import numpy as np
 from scipy.stats import norm
 from scipy.sparse.linalg import spsolve
-
 from src.ProblemaP2 import ProblemaP2
-
 
 class ProblemaP3(ProblemaP2):
     """
     problema probabilistico inverso
 
-    esta classe reaproveita a estrutura do problema p2 e testa os valores de r
-    associados as frequencias de limpeza da tabela do problema p3
+    esta classe reaproveita a estrutura do problema P2 e testa os valores de r
+    associados as frequencias de limpeza da tabela do problema P3
 
     nesta versao a pressao e fixada nos nos de entrada
     """

@@ -5,18 +5,23 @@ from src.Except import *
 from src.Grafo import *
 
 class ProblemaP1(Grafo):
-    def __init__(self, nodes, edges, mu, patm, Q_ext=None):
+    def __init__(self, nodes, edges, mu, patm, Q_ext=None, inflow_pressure=None):
         """
         nodes: lista ou dict de nós
         edges: dict de edges {u:{v:{'area':..., 'length':...}}}
         mu: viscosidade
         patm: pressão de referência
         Q_ext: dict {node: fluxo externo}
+        inflow_pressure: pressão de entrada (opcional)
         """
         super().__init__(nodes, edges, kind='Directed')
         self.mu = mu
         self.Q_ext = None if Q_ext is None else Q_ext
         self.patm = patm
+        
+        # Armazena inflow_pressure como um atributo numérico/None
+        self.inflow_pressure = inflow_pressure
+        
         self.validate_problem_schema()
 
         self.A = None
@@ -30,9 +35,6 @@ class ProblemaP1(Grafo):
             self.set_Q_ext(Q_ext)  
 
     def setup(self):
-        if self.Q_ext is None:
-            raise ValueError("Q_ext must be defined before fitting. Use set_Q_ext().")
-
         self.K = self._compute_physical_matrix()
         self.A = self.compute_connection_matrix(sparse_output=True)
         self.M = (self.A.T @ self.K @ self.A).tocsr()
@@ -42,25 +44,34 @@ class ProblemaP1(Grafo):
     def solve(self):
         if self.Q_ext is None:
             raise ValueError("Define Q_ext before solving the system of equations. Use set_Q_ext() method.")
-        if not self.is_fitted:
-            raise NotFittedError()
 
         node_keys = self.get_node_order()
         b = np.array([self.Q_ext[key] for key in node_keys], dtype=float)
 
-        fixed_indices = np.array([i for i, ext_flow in enumerate(b) if ext_flow < 0], dtype=int)
-        if fixed_indices.size == 0:
-            raise ValueError("No node with negative flow found for reference pressure.")
-
         n = len(node_keys)
+        p = np.zeros(n, dtype=float)
+
+        # Lógica de alternância das condições de contorno
+        if self.inflow_pressure is not None:
+            # Caso a pressão de entrada seja fornecida, fixa as ENTRADAS (fluxo positivo)
+            fixed_indices = np.array([i for i, ext_flow in enumerate(b) if ext_flow > 0], dtype=int)
+            if fixed_indices.size == 0:
+                raise ValueError("No node with positive flow found for reference pressure.")
+            p[fixed_indices] = self.inflow_pressure
+        else:      
+            # Caso contrário, adota o padrão: fixa as SAÍDAS (fluxo negativo) com patm
+            fixed_indices = np.array([i for i, ext_flow in enumerate(b) if ext_flow < 0], dtype=int)
+            if fixed_indices.size == 0:
+                raise ValueError("No node with negative flow found for reference pressure.")
+            p[fixed_indices] = self.patm
+
         all_indices = np.arange(n, dtype=int)
         free_indices = np.setdiff1d(all_indices, fixed_indices)
 
-        p = np.zeros(n, dtype=float)
-        p[fixed_indices] = self.patm
-
         free_free_matrix = self.M[free_indices][:, free_indices]
         free_fixed_matrix = self.M[free_indices][:, fixed_indices]
+        
+        # Agora free_rhs usa corretamente a pressão estipulada (seja inflow_pressure ou patm)
         free_rhs = b[free_indices] - free_fixed_matrix @ p[fixed_indices]
 
         if free_indices.size > 0:
@@ -92,11 +103,6 @@ class ProblemaP1(Grafo):
         return self.q    
 
     def set_Q_ext(self, Q_ext: dict):
-        """
-        Define Q_ext como um dicionário {node: fluxo} e valida:
-        - todos os nós estão presentes
-        - soma dos fluxos é ~0
-        """
         if not isinstance(Q_ext, dict):
             raise TypeError("Q_ext must be a dictionary {node: flow}.")
         
@@ -111,7 +117,7 @@ class ProblemaP1(Grafo):
         self.Q_ext = Q_ext
     
         for node, q in Q_ext.items():
-                self.nodes[node]["fluxo_externo"] = float(q)
+            self.nodes[node]["fluxo_externo"] = float(q)
         
     def validate_problem_schema(self):
         if not isinstance(self.edges, dict):
@@ -122,12 +128,9 @@ class ProblemaP1(Grafo):
                 raise TypeError(f"Edges from node {u} must be a dictionary.")
 
             for v, attrs in self.edges[u].items():
-
-                # checar se attrs é dict
                 if not isinstance(attrs, dict):
                     raise TypeError(f"Edge ({u}->{v}) must have attribute dictionary.")
 
-                # checar chaves obrigatórias
                 required_keys = ["area", "length"]
                 for key in required_keys:
                     if key not in attrs:
@@ -136,13 +139,11 @@ class ProblemaP1(Grafo):
                 A = attrs["area"]
                 L = attrs["length"]
 
-                # checar tipo numérico
                 if not isinstance(A, (int, float)):
                     raise TypeError(f"Edge ({u}->{v}) area must be numeric.")
                 if not isinstance(L, (int, float)):
                     raise TypeError(f"Edge ({u}->{v}) length must be numeric.")
 
-                # checar valores físicos válidos
                 if A <= 0:
                     raise ValueError(f"Edge ({u}->{v}) area must be > 0.")
                 if L <= 0:
@@ -163,7 +164,6 @@ class ProblemaP1(Grafo):
 
     def _compute_physical_matrix(self):
         diagonal = []
-
         for u in self.edges:
             for v, attrs in self.edges[u].items():
                 A = float(attrs["area"])
@@ -177,7 +177,6 @@ class ProblemaP1(Grafo):
         if len(self.Q_ext) != self.num_nodes:
             raise IndexError("Q_ext should be the same size as the number of nodes.")
 
-    # override   
     def insert_edge(self, u, v, **kwargs):
         if u not in self.nodes or v not in self.nodes:
             raise Exception(f"Nodes {u} and {v} must exist.")
@@ -198,5 +197,3 @@ class ProblemaP1(Grafo):
             self.num_edges += 1
 
         self.edges[u][v] = kwargs
-        
-    
